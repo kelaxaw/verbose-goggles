@@ -1,8 +1,6 @@
 import Grid from "@/components/Grid";
-import { useAssets } from "@/hooks/useAssets";
+import type { FeedItem } from "@/types/feed";
 
-export default function Feed() {
-  const { data } = useAssets();
-
+export default function Feed({ data }: { data: FeedItem[] }) {
   return <Grid data={data} />;
 }

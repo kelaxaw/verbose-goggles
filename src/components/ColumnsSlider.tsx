@@ -1,5 +1,5 @@
 import { Slider } from "@/components/ui/slider";
-import { useColumns } from "@/contexts/columns.context";
+import { useColumns } from "@/hooks/useColumns";
 
 export function ColumnsSlider() {
   const { columns, setColumns } = useColumns();

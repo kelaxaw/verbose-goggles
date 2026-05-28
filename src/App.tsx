@@ -1,22 +1,21 @@
 import { ColumnsSlider } from "./components/ColumnsSlider";
 import Feed from "./components/Feed";
-import { ColumnsProvider } from "./contexts/columns.context";
+import { ColumnsProvider } from "./contexts/columns.provider";
+import { useAssets } from "./hooks/useAssets";
+import { ItemCount } from "./components/ItemCount";
 
 function App() {
+  const { data } = useAssets();
+
   return (
     <ColumnsProvider>
       <div className="h-svh flex flex-col">
+        <Feed data={data} />
+        <ItemCount count={data.length} />
         <ColumnsSlider />
-        <Feed />
       </div>
     </ColumnsProvider>
   );
 }
 
 export default App;
-
-//TODO
-// 1. Сделать задержку загрузки асетов пока юзер не перестанет скролить
-// 2. Сделать превью асетов (скелетоны)
-// 3. Починить якорь на асеты при изменении окна
-// 3. Добавить видео

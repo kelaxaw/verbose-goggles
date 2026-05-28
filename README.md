@@ -1,75 +1,133 @@
-# React + TypeScript + Vite
+# Media Feed — justified rows at scale
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A React + TypeScript feed that lays out mixed images and videos in justified
+rows, virtualizes thousands of items, and keeps the user anchored across
+column-count and viewport changes.
 
-Currently, two official plugins are available:
+The task brief lives in [SPECS.md](SPECS.md).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Setup
 
-## React Compiler
-
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
-
-Note: This will impact Vite dev & build performances.
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+pnpm install
+pnpm dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open the printed local URL. The app fetches a prebuilt dataset from
+`public/db/feed.json` (~2.5k mixed items) — no API keys needed to run.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Other commands:
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+pnpm test          # run the layout unit tests (Vitest)
+pnpm test:watch    # watch mode
+pnpm build         # tsc -b + vite build
+pnpm build:dataset # regenerate the dataset (needs PEXELS_API_KEY, see below)
 ```
+
+## What's done
+
+All four required capabilities, plus four of the six stretch goals.
+
+### Required
+
+- **R1 — Justified-row layout.** [`computeJustifiedRows`](src/layout/justified.ts)
+  arranges items into rows that fill the container width, preserving each item's
+  aspect ratio. Full rows fill width exactly; an underfull **last row** is capped
+  in height (to the previous row, else a square proxy) so a lone wide item can't
+  blow up tall — it underfills width instead, the "padding" the brief asks for.
+- **R2 — Scales to ~2k+ items.** Row-level virtualization via
+  [`@tanstack/react-virtual`](src/components/Grid.tsx) keeps the DOM bounded
+  regardless of dataset size (datasets up to ~4k items in `public/db/`).
+- **R3 — Column control + anchored resize.** A [slider](src/components/ColumnsSlider.tsx)
+  (1–6) drives the column count via context. [`useScrollAnchor`](src/hooks/useScrollAnchor.ts)
+  keeps the user pinned to the same item across both column changes and viewport
+  resize — anchoring by **item id**, not row index, because reflow moves items
+  between rows.
+- **R4 — Efficient media loading.** A shared
+  [IntersectionObserver](src/hooks/useScrollObserver.ts) (600px rootMargin)
+  loads media only as cells approach the viewport. Videos never autoload —
+  they mount and play **on hover only**, so scrolling past a cell costs nothing.
+
+### Stretch
+
+- **S1 — Column-count transition.** On column change, rows slide to new
+  positions (CSS `transform`/`height` transition, enabled only during the
+  ~280ms window so scroll stays snappy) plus a brief **blur-settle** on the
+  grid. Deliberately *not* a FLIP and *not* an opacity fade — opacity revealed
+  the black page background as a flicker; blur keeps the grid opaque while it
+  reflows. See [Grid.tsx](src/components/Grid.tsx) + [globals.css](src/globals.css).
+- **S2 — Fast-scroll grace.** Above a velocity threshold the observer is paused
+  so flicked-past cells don't queue loads; on settle it replays only cells still
+  in the live viewport. See `handleScroll` + `setPaused` in
+  [Grid.tsx](src/components/Grid.tsx) / [useScrollObserver.ts](src/hooks/useScrollObserver.ts).
+- **S3 — Media cache across virtualization.** `imageMemoryCache` /
+  `videoMemoryCache` store **metadata only** (resolved src + loaded flag) so a
+  cell that scrolls away and back doesn't refetch or flash its thumbnail. The
+  bytes themselves live in the browser HTTP cache.
+- **S4 — Right-sized media.** Items carry a `srcTemplate` with `{w}`/`{h}`
+  placeholders. The cell resolves a width snapped to a step (folding in DPR,
+  capped at 2×) so a handful of distinct URLs cover the viewport range and reuse
+  HTTP-cache hits across reflows. Images use Picsum; videos use a Cloudinary
+  `fetch` URL that transcodes the Pexels master down per width.
+
+## Design decisions
+
+- **Fixed columns vs. target row height.** The brief's R3 is a *column-count*
+  control, so the layout is driven by a column count that maps 1:1 to the slider.
+  The common alternative (target row **height**, variable items per row) is the
+  classic Flickr/Google-Photos look. I kept a faithful copy of that approach in
+  [`justified.reference.ts`](src/layout/justified.reference.ts) and a benchmark
+  ([`scripts/bench-layout.ts`](scripts/bench-layout.ts)) to compare them — both
+  are O(n) and sub-millisecond on 4k items, so the choice is about UX/visuals,
+  not perf.
+- **Row virtualization, not item virtualization.** Justified rows are the
+  natural unit — each row is a flex container, so within-row layout is free.
+- **Hover-gated video.** Mounting `<video>` for every visible cell would queue
+  dozens of multi-MB downloads. Hover is an explicit intent signal; on hover the
+  element mounts and `play()` fires immediately for progressive playback (no
+  wait for full buffer).
+- **Shared IntersectionObserver.** One observer with a `Map` of element→callback,
+  rather than one observer per cell — cheaper, and the pause/resume logic for S2
+  lives in one place.
+
+## Dataset
+
+Generated by [`scripts/build-dataset.ts`](scripts/build-dataset.ts):
+
+- **Images** — Picsum (`picsum.photos`), no key, real dimensions.
+- **Videos** — Pexels Videos (needs `PEXELS_API_KEY`), wrapped in a Cloudinary
+  `fetch` URL for right-sizing, plus Google `gtv-videos-bucket` sample MP4s.
+- Combined with a **seeded shuffle** so the order is stable across runs (keeps
+  scroll-anchor behavior reproducible).
+
+Prebuilt JSONs are committed in `public/db/` (`feed.json` is the one the app
+loads; swap the route in [useAssets.ts](src/hooks/useAssets.ts) to try the
+larger sets).
+
+To regenerate: set `CLOUDINARY_CLOUD_NAME` (or `CLOUDINARY_URL`) and
+`PEXELS_API_KEY`, enable **"Allow delivery of fetched URLs"** in the Cloudinary
+console, then `pnpm build:dataset`.
+
+## Tests
+
+[`src/layout/justified.test.ts`](src/layout/justified.test.ts) (Vitest) covers
+the layout algorithm: guard clauses, row composition (full rows + remainder,
+full item coverage), geometry (width-fill, aspect-ratio preservation, height
+formula, gap handling), determinism, and edge cases — including the last-row
+cap (lone wide item stays small and underfills instead of blowing up).
+
+```bash
+pnpm test
+```
+
+## Known issues / next steps
+
+- **S6 (live prepend) not implemented.** No mechanism to prepend "just
+  generated" items; the scroll-anchor logic would extend to cover it.
+- **Cloudinary `fetch` fragility.** First-hit transcodes can hang or 400 if
+  Cloudinary can't reach Pexels or the setting above isn't enabled. The Google
+  samples are the reliable fallback for a demo.
+- **No reduced-motion guard** on the column transition yet.
+- **Data fetching** is a plain `fetch` + `useState` in `useAssets`;
+  `@tanstack/react-query` is installed but unused for this single static load.

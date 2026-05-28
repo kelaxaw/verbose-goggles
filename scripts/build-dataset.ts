@@ -1,211 +1,134 @@
 #!/usr/bin/env node
-// Run: npx tsx scripts/build-dataset.ts
-// Requires: PEXELS_API_KEY in environment or .env file
-// Output: public/feed.json
+// Run: pnpm build:dataset
+// No API keys required — fully generative, deterministic across runs.
+// Images: Picsum seed URLs. Videos: Cloudinary demo pool.
+// Output: public/db/feed.json
 
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
+import type { FeedItem } from "../src/types/feed";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
-const OUT_PATH = path.join(ROOT, "public", "feed.json");
+const OUT_PATH = path.join(ROOT, "public", "db", "feed.json");
 
-const PEXELS_KEY = process.env.PEXELS_API_KEY;
+const TARGET_IMAGES = 1900;
+const TARGET_VIDEOS = 100;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── PRNG ─────────────────────────────────────────────────────────────────────
 
-export type FeedItem = {
-  id: string;
-  kind: "image" | "video";
-  width: number;
-  height: number;
-  // For images: URL template — replace {w} and {h} with cell size at render time
-  src: string;
-  srcTemplate?: string;
-  // Poster frame for video — must be set to avoid black square on load
-  poster?: string;
-  duration?: number;
-};
-
-// ─── Picsum (no API key required) ────────────────────────────────────────────
-
-interface PicsumRaw {
-  id: string;
-  width: number;
-  height: number;
+function mulberry32(seed: number) {
+  let t = seed >>> 0;
+  return function rand(): number {
+    t = (t + 0x6d2b79f5) >>> 0;
+    let r = t;
+    r = Math.imul(r ^ (r >>> 15), r | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-async function fetchPicsum(pages: number): Promise<FeedItem[]> {
-  const items: FeedItem[] = [];
+const rand = mulberry32(0xc0ffee);
 
-  for (let page = 1; page <= pages; page++) {
-    const res = await fetch(
-      `https://picsum.photos/v2/list?page=${page}&limit=100`,
-    );
-    if (!res.ok) throw new Error(`Picsum page ${page}: HTTP ${res.status}`);
+// ─── Images (Picsum seed URLs) ────────────────────────────────────────────────
 
-    const data: PicsumRaw[] = await res.json();
+const ASPECT_BUCKETS: { w: number; h: number; weight: number }[] = [
+  { w: 3,  h: 2,  weight: 25 },
+  { w: 4,  h: 3,  weight: 15 },
+  { w: 16, h: 9,  weight: 12 },
+  { w: 1,  h: 1,  weight: 12 },
+  { w: 2,  h: 3,  weight: 18 },
+  { w: 3,  h: 4,  weight: 10 },
+  { w: 9,  h: 16, weight:  8 },
+];
 
-    for (const item of data) {
-      items.push({
-        id: `picsum-${item.id}`,
-        kind: "image",
-        width: item.width,
-        height: item.height,
-        // Base src at medium resolution for initial load
-        src: `https://picsum.photos/id/${item.id}/1200/${Math.round((1200 * item.height) / item.width)}`,
-        // Right-sized media template (S4): substitute {w} and {h} in the app
-        srcTemplate: `https://picsum.photos/id/${item.id}/{w}/{h}`,
-      });
-    }
-
-    process.stdout.write(
-      `\rPicsum: page ${page}/${pages} (${items.length} images)`,
-    );
+function pickWeighted<T extends { weight: number }>(buckets: T[]): T {
+  const total = buckets.reduce((s, b) => s + b.weight, 0);
+  let r = rand() * total;
+  for (const b of buckets) {
+    r -= b.weight;
+    if (r <= 0) return b;
   }
+  return buckets[buckets.length - 1];
+}
 
-  console.log();
+function generateImages(count: number): FeedItem[] {
+  const items: FeedItem[] = [];
+  for (let i = 0; i < count; i++) {
+    const bucket = pickWeighted(ASPECT_BUCKETS);
+    const scale = 0.75 + rand() * 0.5;
+    const long = Math.round(1600 * scale);
+    const isLandscape = bucket.w >= bucket.h;
+    const width  = isLandscape ? long : Math.round(long * bucket.w / bucket.h);
+    const height = isLandscape ? Math.round(long * bucket.h / bucket.w) : long;
+    const seed = `hf-${i.toString(36)}-${Math.floor(rand() * 1e9).toString(36)}`;
+    items.push({
+      id: `img-${String(i).padStart(5, "0")}`,
+      kind: "image",
+      width,
+      height,
+      author: `Picsum`,
+      src: `https://picsum.photos/seed/${seed}/1200/${Math.round(1200 * height / width)}`,
+      srcTemplate: `https://picsum.photos/seed/${seed}/{w}/{h}`,
+    });
+  }
+  console.log(`Images: generated ${items.length} via Picsum seed URLs`);
   return items;
 }
 
-// ─── Pexels Videos (API key required) ────────────────────────────────────────
+// ─── Videos (Cloudinary demo pool) ───────────────────────────────────────────
 
-interface PexelsVideoFile {
-  link: string;
-  width: number;
-  height: number;
-  quality: string;
-  file_type: string;
-}
+const VIDEO_POOL: { src: string; width: number; height: number; duration: number }[] = [
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640/dog.mp4",             width: 1280, height: 720,  duration: 10 },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640/elephants.mp4",        width: 1280, height: 720,  duration: 12 },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640/sea_turtle.mp4",       width: 1280, height: 720,  duration: 8  },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640/kitten_fighting.mp4",  width: 1280, height: 720,  duration: 15 },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640/cat.mp4",              width: 1280, height: 720,  duration: 6  },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640/airplane.mp4",         width: 1280, height: 720,  duration: 9  },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_360,ar_9:16,c_fill/dog.mp4",            width: 720,  height: 1280, duration: 10 },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_360,ar_9:16,c_fill/kitten_fighting.mp4", width: 720,  height: 1280, duration: 15 },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_360,ar_9:16,c_fill/elephants.mp4",       width: 720,  height: 1280, duration: 12 },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_480,ar_1:1,c_fill/cat.mp4",             width: 1080, height: 1080, duration: 6  },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_480,ar_1:1,c_fill/sea_turtle.mp4",      width: 1080, height: 1080, duration: 8  },
+  { src: "https://res.cloudinary.com/demo/video/upload/q_auto,f_mp4,w_640,ar_4:3,c_fill/airplane.mp4",        width: 1440, height: 1080, duration: 9  },
+];
 
-interface PexelsVideo {
-  id: number;
-  width: number;
-  height: number;
-  duration: number;
-  image: string;
-  video_files: PexelsVideoFile[];
-}
-
-interface PexelsResponse {
-  videos: PexelsVideo[];
-}
-
-async function fetchPexels(
-  queries: string[],
-  pagesPerQuery: number,
-): Promise<FeedItem[]> {
-  if (!PEXELS_KEY) {
-    console.warn("PEXELS_API_KEY not set — Pexels videos skipped");
-    return [];
-  }
-
-  const seen = new Set<number>();
+function generateVideos(count: number): FeedItem[] {
   const items: FeedItem[] = [];
-
-  for (const query of queries) {
-    for (let page = 1; page <= pagesPerQuery; page++) {
-      const res = await fetch(
-        `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=80&page=${page}`,
-        { headers: { Authorization: PEXELS_KEY } },
-      );
-
-      if (res.status === 429) {
-        console.warn(`\nPexels: rate limited, waiting 60s...`);
-        await sleep(60_000);
-        continue;
-      }
-      if (!res.ok)
-        throw new Error(`Pexels "${query}" page ${page}: HTTP ${res.status}`);
-
-      const data: PexelsResponse = await res.json();
-
-      for (const video of data.videos) {
-        if (seen.has(video.id)) continue;
-        seen.add(video.id);
-
-        // Pick best MP4 by width
-        const file = video.video_files
-          .filter((f) => f.file_type === "video/mp4" && f.width > 0)
-          .sort((a, b) => b.width - a.width)[0];
-
-        if (!file) continue;
-
-        items.push({
-          id: `pexels-${video.id}`,
-          kind: "video",
-          width: video.width || file.width,
-          height: video.height || file.height,
-          src: file.link,
-          poster: video.image,
-          duration: video.duration,
-        });
-      }
-
-      process.stdout.write(
-        `\rPexels "${query}": page ${page}/${pagesPerQuery} (${items.length} videos total)`,
-      );
-
-      // Pexels free tier: 200 req/min → 300ms between requests
-      await sleep(350);
-    }
-    console.log();
+  for (let i = 0; i < count; i++) {
+    const clip = VIDEO_POOL[i % VIDEO_POOL.length];
+    const posterSeed = `vid-${i.toString(36)}-${Math.floor(rand() * 1e9).toString(36)}`;
+    const posterW = Math.min(clip.width, 640);
+    const posterH = Math.max(1, Math.round(posterW * clip.height / clip.width));
+    items.push({
+      id: `video-${String(i).padStart(4, "0")}`,
+      kind: "video",
+      width: clip.width,
+      height: clip.height,
+      duration: clip.duration,
+      src: clip.src,
+      poster: `https://picsum.photos/seed/${posterSeed}/${posterW}/${posterH}`,
+      posterTemplate: `https://picsum.photos/seed/${posterSeed}/{w}/{h}`,
+    });
   }
-
+  console.log(`Videos: generated ${items.length} from pool of ${VIDEO_POOL.length} clips`);
   return items;
 }
 
-// ─── Google sample MP4s (no key, fixed list) ──────────────────────────────────
+// ─── Shuffle ──────────────────────────────────────────────────────────────────
 
-function getGoogleSamples(): FeedItem[] {
-  const BASE = "https://storage.googleapis.com/gtv-videos-bucket/sample";
-
-  const samples: Array<{ name: string; width: number; height: number }> = [
-    { name: "BigBuckBunny", width: 1280, height: 720 },
-    { name: "ElephantsDream", width: 1280, height: 720 },
-    { name: "ForBiggerBlazes", width: 1280, height: 720 },
-    { name: "ForBiggerEscapes", width: 1280, height: 720 },
-    { name: "ForBiggerFun", width: 1280, height: 720 },
-    { name: "ForBiggerJoyrides", width: 1280, height: 720 },
-    { name: "ForBiggerMeltdowns", width: 1280, height: 720 },
-    { name: "SubaruOutbackOnStreetAndDirt", width: 1280, height: 720 },
-    { name: "TearsOfSteel", width: 1280, height: 720 },
-    { name: "VolkswagenGTIReview", width: 1280, height: 720 },
-    { name: "WeAreGoingOnBullrun", width: 1280, height: 720 },
-    { name: "WhatCarCanYouGetForAGrand", width: 1280, height: 720 },
-  ];
-
-  return samples.map((s) => ({
-    id: `google-${s.name.toLowerCase().replace(/\s+/g, "-")}`,
-    kind: "video" as const,
-    width: s.width,
-    height: s.height,
-    src: `${BASE}/${s.name}.mp4`,
-    poster: `${BASE}/images/${s.name}.jpg`,
-  }));
-}
-
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Deterministic shuffle — same order on every run (stable for scroll anchor testing)
 function seededShuffle<T>(arr: T[], seed: string): T[] {
   let s = [...seed].reduce((acc, c) => acc + c.charCodeAt(0), 0);
-
-  const rand = () => {
+  const r = () => {
     s = Math.imul(s ^ (s >>> 16), 0x45d9f3b);
     s = Math.imul(s ^ (s >>> 16), 0x45d9f3b);
     s ^= s >>> 16;
     return (s >>> 0) / 0xffffffff;
   };
-
   const result = [...arr];
   for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
+    const j = Math.floor(r() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -216,30 +139,16 @@ function seededShuffle<T>(arr: T[], seed: string): T[] {
 async function main() {
   console.log("Building dataset...\n");
 
-  const [images, pexelsVideos] = await Promise.all([
-    fetchPicsum(15), // 1500 images
-    fetchPexels(
-      ["nature", "city", "people", "ocean", "architecture"],
-      4, // ~400–500 unique videos after dedup
-    ),
-  ]);
-
-  const googleVideos = getGoogleSamples();
-  const combined = seededShuffle(
-    [...images, ...pexelsVideos, ...googleVideos],
-    "higgsfield-2026",
-  );
-
-  const imageCount = combined.filter((i) => i.kind === "image").length;
-  const videoCount = combined.filter((i) => i.kind === "video").length;
+  const images = generateImages(TARGET_IMAGES);
+  const videos = generateVideos(TARGET_VIDEOS);
+  const combined = seededShuffle([...images, ...videos], "higgsfield-2026");
 
   console.log(`\nTotal: ${combined.length} items`);
-  console.log(`  Images: ${imageCount}`);
-  console.log(`  Videos: ${videoCount}`);
+  console.log(`  Images: ${combined.filter((i) => i.kind === "image").length}`);
+  console.log(`  Videos: ${combined.filter((i) => i.kind === "video").length}`);
 
   await mkdir(path.dirname(OUT_PATH), { recursive: true });
   await writeFile(OUT_PATH, JSON.stringify(combined, null, 2), "utf-8");
-
   console.log(`\nWritten: ${OUT_PATH}`);
 }
 

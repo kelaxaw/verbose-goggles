@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
-import type { FeedItem } from "scripts/build-dataset";
+import type { FeedItem } from "@/types/feed";
 
 const getAssets = async () => {
-  const data = await fetch("/feed.json");
-  return data.json();
+  const response = await fetch("db/feed.json");
+  return (await response.json()) as FeedItem[];
 };
 
 export const useAssets = () => {
-  const [data, setData] = useState<FeedItem[] | []>([]);
+  const [data, setData] = useState<FeedItem[]>([]);
 
   useEffect(() => {
     getAssets().then((data) => setData(data));
