@@ -1,5 +1,7 @@
 # Media Feed — justified rows at scale
 
+**[▶ Watch the demo screencast](https://www.tella.tv/video/high-performance-media-feed-demo-9s2d)**
+
 A React + TypeScript feed that lays out mixed images and videos in justified
 rows, virtualizes thousands of items, and keeps the user anchored across
 column-count and viewport changes.
@@ -14,7 +16,7 @@ pnpm dev
 ```
 
 Open the printed local URL. The app fetches a prebuilt dataset from
-`public/db/feed.json` (~2.5k mixed items) — no API keys needed to run.
+`public/db/feed.json` (~2k mixed items) — no API keys needed to run.
 
 Other commands:
 
@@ -22,45 +24,44 @@ Other commands:
 pnpm test          # run the layout unit tests (Vitest)
 pnpm test:watch    # watch mode
 pnpm build         # tsc -b + vite build
-pnpm build:dataset # regenerate the dataset (needs PEXELS_API_KEY, see below)
+pnpm build:dataset # regenerate the dataset (no API key required)
 ```
 
 ## What's done
 
-All four required capabilities, plus four of the six stretch goals.
+All four required capabilities, plus three of the six stretch goals.
 
 ### Required
 
-- **R1 — Justified-row layout.** [`computeJustifiedRows`](src/layout/justified.ts)
-  arranges items into rows that fill the container width, preserving each item's
-  aspect ratio. Full rows fill width exactly; an underfull **last row** is capped
-  in height (to the previous row, else a square proxy) so a lone wide item can't
-  blow up tall — it underfills width instead, the "padding" the brief asks for.
+- **R1 — Justified-row layout.** [`packRows`](src/grid/rowPacker.ts)
+  arranges items into rows with visually consistent heights. The `columns`
+  slider maps to a **target row height** — roughly how tall a row of that many
+  square items would be. The packer finds row boundaries that keep actual heights
+  close to that target even with mixed portrait/landscape content.
+  Implementation: aspect-ratio prefix sums for O(1) height queries + binary
+  search per row boundary → O(n log k) total. The underfull **last row** is
+  capped at `targetHeight` so a lone wide item underfills width instead of
+  blowing up tall.
 - **R2 — Scales to ~2k+ items.** Row-level virtualization via
   [`@tanstack/react-virtual`](src/components/Grid.tsx) keeps the DOM bounded
-  regardless of dataset size (datasets up to ~4k items in `public/db/`).
+  regardless of dataset size.
 - **R3 — Column control + anchored resize.** A [slider](src/components/ColumnsSlider.tsx)
   (1–6) drives the column count via context. [`useScrollAnchor`](src/hooks/useScrollAnchor.ts)
   keeps the user pinned to the same item across both column changes and viewport
   resize — anchoring by **item id**, not row index, because reflow moves items
   between rows.
 - **R4 — Efficient media loading.** A shared
-  [IntersectionObserver](src/hooks/useScrollObserver.ts) (600px rootMargin)
-  loads media only as cells approach the viewport. Videos never autoload —
-  they mount and play **on hover only**, so scrolling past a cell costs nothing.
+  [IntersectionObserver](src/hooks/useScrollObserver.ts) (600px rootMargin),
+  managed by [`useFeedObserver`](src/hooks/useFeedObserver.ts), loads media only
+  as cells approach the viewport. Videos never autoload — they mount and play
+  **on hover only**, so scrolling past a cell costs nothing.
 
 ### Stretch
 
-- **S1 — Column-count transition.** On column change, rows slide to new
-  positions (CSS `transform`/`height` transition, enabled only during the
-  ~280ms window so scroll stays snappy) plus a brief **blur-settle** on the
-  grid. Deliberately *not* a FLIP and *not* an opacity fade — opacity revealed
-  the black page background as a flicker; blur keeps the grid opaque while it
-  reflows. See [Grid.tsx](src/components/Grid.tsx) + [globals.css](src/globals.css).
-- **S2 — Fast-scroll grace.** Above a velocity threshold the observer is paused
-  so flicked-past cells don't queue loads; on settle it replays only cells still
-  in the live viewport. See `handleScroll` + `setPaused` in
-  [Grid.tsx](src/components/Grid.tsx) / [useScrollObserver.ts](src/hooks/useScrollObserver.ts).
+- **S2 — Fast-scroll grace.** [`useScrollGuard`](src/hooks/useScrollGuard.ts)
+  measures scroll velocity; above a threshold it pauses the IntersectionObserver
+  so flicked-past cells don't queue loads. On settle (150ms idle) the observer
+  resumes and replays only cells still in the live viewport.
 - **S3 — Media cache across virtualization.** `imageMemoryCache` /
   `videoMemoryCache` store **metadata only** (resolved src + loaded flag) so a
   cell that scrolls away and back doesn't refetch or flash its thumbnail. The
@@ -68,54 +69,57 @@ All four required capabilities, plus four of the six stretch goals.
 - **S4 — Right-sized media.** Items carry a `srcTemplate` with `{w}`/`{h}`
   placeholders. The cell resolves a width snapped to a step (folding in DPR,
   capped at 2×) so a handful of distinct URLs cover the viewport range and reuse
-  HTTP-cache hits across reflows. Images use Picsum; videos use a Cloudinary
-  `fetch` URL that transcodes the Pexels master down per width.
+  HTTP-cache hits across reflows.
 
 ## Design decisions
 
-- **Fixed columns vs. target row height.** The brief's R3 is a *column-count*
-  control, so the layout is driven by a column count that maps 1:1 to the slider.
-  The common alternative (target row **height**, variable items per row) is the
-  classic Flickr/Google-Photos look. I kept a faithful copy of that approach in
-  [`justified.reference.ts`](src/layout/justified.reference.ts) and a benchmark
-  ([`scripts/bench-layout.ts`](scripts/bench-layout.ts)) to compare them — both
-  are O(n) and sub-millisecond on 4k items, so the choice is about UX/visuals,
-  not perf.
+- **Target row height, variable items per row.** The slider value maps to a
+  target height (≈ how tall a row of N square items would be at that column
+  count). The packer then uses binary search to find how many items fit closest
+  to that height per row — so a row of all portraits might take 4 items while a
+  row of landscapes takes 2, and both sit at roughly the same height. This keeps
+  the feed visually consistent regardless of aspect-ratio mix. Row heights stay
+  within 2× of each other on realistic mixed content (see the test).
+  A faithful implementation of the simpler fixed-N-per-row approach (where
+  column count maps literally to items per row) was considered but produces
+  wildly varying row heights with mixed content.
 - **Row virtualization, not item virtualization.** Justified rows are the
   natural unit — each row is a flex container, so within-row layout is free.
 - **Hover-gated video.** Mounting `<video>` for every visible cell would queue
   dozens of multi-MB downloads. Hover is an explicit intent signal; on hover the
   element mounts and `play()` fires immediately for progressive playback (no
   wait for full buffer).
-- **Shared IntersectionObserver.** One observer with a `Map` of element→callback,
-  rather than one observer per cell — cheaper, and the pause/resume logic for S2
-  lives in one place.
+- **Shared IntersectionObserver.** One observer (via `useFeedObserver`) with a
+  `Map` of element→callback, rather than one observer per cell — cheaper, and
+  the pause/resume logic for S2 lives in one place (`useScrollGuard`).
+- **LQIP crossfade.** `ThumbOverlay` renders a 40px blur placeholder that fades
+  out once the full image loads, kept in the DOM (not unmounted) to avoid a dark
+  flash between placeholder removal and image paint.
 
 ## Dataset
 
-Generated by [`scripts/build-dataset.ts`](scripts/build-dataset.ts):
+Generated by [`scripts/build-dataset.ts`](scripts/build-dataset.ts) — **no API
+keys required**, fully deterministic across runs:
 
-- **Images** — Picsum (`picsum.photos`), no key, real dimensions.
-- **Videos** — Pexels Videos (needs `PEXELS_API_KEY`), wrapped in a Cloudinary
-  `fetch` URL for right-sizing, plus Google `gtv-videos-bucket` sample MP4s.
+- **Images** — Picsum seed URLs (`picsum.photos/seed/<seed>/{w}/{h}`), weighted
+  aspect-ratio buckets (landscape/portrait/square mix), mulberry32 PRNG.
+- **Videos** — A pool of 12 Cloudinary demo clips in multiple aspect ratios
+  (16:9, 9:16, 1:1, 4:3). Posters are Picsum seed images matched to each clip's
+  dimensions.
 - Combined with a **seeded shuffle** so the order is stable across runs (keeps
   scroll-anchor behavior reproducible).
 
-Prebuilt JSONs are committed in `public/db/` (`feed.json` is the one the app
-loads; swap the route in [useAssets.ts](src/hooks/useAssets.ts) to try the
-larger sets).
-
-To regenerate: set `CLOUDINARY_CLOUD_NAME` (or `CLOUDINARY_URL`) and
-`PEXELS_API_KEY`, enable **"Allow delivery of fetched URLs"** in the Cloudinary
-console, then `pnpm build:dataset`.
+Output: `public/db/feed.json` (~2k items). Run `pnpm build:dataset` to
+regenerate.
 
 ## Tests
 
-[`src/layout/justified.test.ts`](src/layout/justified.test.ts) (Vitest) covers
-the layout algorithm: guard clauses, row composition (full rows + remainder,
-full item coverage), geometry (width-fill, aspect-ratio preservation, height
-formula, gap handling), determinism, and edge cases — including the last-row
-cap (lone wide item stays small and underfills instead of blowing up).
+[`src/grid/rowPacker.test.ts`](src/grid/rowPacker.test.ts) (Vitest) covers
+the layout algorithm: guard clauses, full item coverage (order preserved),
+geometry (width-fill on full rows, aspect-ratio preservation, last-row height
+cap, underfill on portrait remainder, height consistency within 2× on mixed
+content), determinism, and column-count semantics (more columns → shorter rows,
+columns=1 → one item per row).
 
 ```bash
 pnpm test
@@ -123,11 +127,10 @@ pnpm test
 
 ## Known issues / next steps
 
-- **S6 (live prepend) not implemented.** No mechanism to prepend "just
-  generated" items; the scroll-anchor logic would extend to cover it.
-- **Cloudinary `fetch` fragility.** First-hit transcodes can hang or 400 if
-  Cloudinary can't reach Pexels or the setting above isn't enabled. The Google
-  samples are the reliable fallback for a demo.
-- **No reduced-motion guard** on the column transition yet.
-- **Data fetching** is a plain `fetch` + `useState` in `useAssets`;
-  `@tanstack/react-query` is installed but unused for this single static load.
+- **S1 (column-count transition) not implemented.** Items snap to new positions
+  on column change instead of animating. Could be done with a short CSS
+  `transition` on `transform`/`height` gated to the ~300ms reflow window so
+  normal scrolling stays snappy.
+- **S5/S6 not implemented.** No animated resize smoothing beyond the rAF-debounced
+  `ResizeObserver`; no mechanism to prepend "just generated" items without a
+  scroll-position jump.
